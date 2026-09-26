@@ -1,0 +1,191 @@
+<!doctype html>
+<!--
+  voiceframe-by-meno · kinetic text layer template
+  ------------------------------------------------
+  Do not rewrite this file per project. Fill a JSON config instead (see the
+  SAMPLE below and references/example-output.md) and render it with
+  scripts/render_text_layer.js, which injects the config as window.TEXT_CONFIG.
+
+  window.render(t)  sets every element for time t (seconds on the VO timeline).
+                    It is deterministic: no CSS animations, no timers.
+                    Returns a short state signature so identical frames can be
+                    reused by the renderer.
+  window.textLayerReady  a promise that resolves once fonts are loaded and the
+                    layout (including auto-shrink) is final.
+
+  Open this file directly in a browser to preview the SAMPLE config: it plays
+  in real time.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #stage { position: absolute; left: 0; top: 0; overflow: hidden; }
+  .item { position: absolute; white-space: nowrap; will-change: transform, opacity, filter; }
+  .line { display: block; }
+  .unit { display: inline-block; white-space: pre; will-change: transform, opacity, filter; }
+  .sp { display: inline-block; white-space: pre; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+(function () {
+  // ---------------------------------------------------------------- SAMPLE --
+  // Every key is documented here. Times are seconds on the full VO timeline.
+  const SAMPLE = {
+    width: 1920, height: 1080,       // 1080x1920 for 9:16
+    safe: 0.05,                      // safe margin as a fraction of each side
+    fonts: [                         // filled by the renderer from @fontsource
+      // { family: "Montserrat", weight: 800, style: "normal", src: "data:font/woff2;base64,..." }
+    ],
+    styles: {
+      bold: { family: "Montserrat, Arial Black, sans-serif", weight: 800, size: 130, color: "#2A2A2E", italic: false, tracking: -0.01, case: "none" },
+      thin: { family: "Playfair Display, Georgia, serif", weight: 400, size: 72, color: "#2A2A2E", italic: true, tracking: 0 },
+      accent: { family: "Montserrat, Arial Black, sans-serif", weight: 800, size: 170, color: "#E08A2E", italic: false, tracking: -0.02, glow: "0 0 24px rgba(242,166,90,.45)" }
+    },
+    defaults: { anim: "blur-rise", unitDur: 0.35, exitDur: 0.3, emphScale: 1.14 },
+    // Captions: render_text_layer.js --captions builds items from the VO word timestamps.
+    // Styles may also use  stroke: "6px #111"  and, for anim "karaoke",  highlight: "#FFD84A".
+    items: [
+      { id: "b1", start: 0.2, end: 2.6, x: 0.08, y: 0.18, align: "left", valign: "top", style: "thin",
+        words: [ { w: "how", t: 0.2 }, { w: "ordinary", t: 0.55, emph: true, style: "bold" } ] },
+      { id: "b2", start: 2.9, end: 5.4, x: 0.5, y: 0.5, align: "center", valign: "middle", anim: "pop",
+        words: [ { w: "72%", t: 2.9, style: "accent", emph: true }, { w: "at least once", t: 3.6, style: "thin", br: true } ] },
+      { id: "b3", start: 5.7, end: 8.0, x: 0.92, y: 0.82, align: "right", valign: "bottom", anim: "typewriter", style: "bold",
+        words: [ { w: "every single day", t: 5.7 } ] }
+    ]
+  };
+  // -------------------------------------------------------------------------
+
+  const C = window.TEXT_CONFIG || SAMPLE;
+  const D = Object.assign({ anim: "blur-rise", unitDur: 0.35, exitDur: 0.3, emphScale: 1.14 }, C.defaults || {});
+  const W = C.width || 1920, H = C.height || 1080, SAFE = C.safe == null ? 0.05 : C.safe;
+  const stage = document.getElementById('stage');
+  stage.style.width = W + 'px'; stage.style.height = H + 'px';
+  if (C.debugBackground) document.body.style.background = C.debugBackground;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const easeOut = p => 1 - Math.pow(1 - p, 3);
+  const easeOutBack = p => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2); };
+  const r2 = v => Math.round(v * 100) / 100;
+
+  function styleOf(name) { return Object.assign({ family: 'sans-serif', weight: 700, size: 96, color: '#111', italic: false, tracking: 0 }, (C.styles || {})[name] || {}); }
+  function applyStyle(el, s, k) {
+    el.style.fontFamily = s.family; el.style.fontWeight = s.weight;
+    el.style.fontStyle = s.italic ? 'italic' : 'normal';
+    el.style.fontSize = (s.size * k) + 'px'; el.style.lineHeight = s.lineHeight || 1.02;
+    el.style.letterSpacing = (s.tracking || 0) + 'em'; el.style.color = s.color;
+    if (s.glow) el.style.textShadow = s.glow;
+    if (s.stroke) { el.style.webkitTextStroke = s.stroke; el.style.paintOrder = 'stroke fill'; }
+    if (s.case === 'upper') el.style.textTransform = 'uppercase';
+    if (s.case === 'lower') el.style.textTransform = 'lowercase';
+  }
+
+  // Build DOM: item > line > unit (word, or character for typewriter)
+  const built = (C.items || []).map(it => {
+    const el = document.createElement('div'); el.className = 'item'; stage.appendChild(el);
+    const anim = it.anim || D.anim;
+    const units = []; let line = null;
+    (it.words || []).forEach((wd, i) => {
+      if (!line || wd.br) { line = document.createElement('div'); line.className = 'line'; el.appendChild(line); }
+      else { const sp = document.createElement('span'); sp.className = 'sp'; sp.textContent = ' '; line.appendChild(sp); applyStyle(sp, styleOf(wd.style || it.style), 1); sp.dataset.style = wd.style || it.style; }
+      const stName = wd.style || it.style;
+      if (anim === 'typewriter') {
+        const chars = [...wd.w]; const next = (it.words[i + 1] && it.words[i + 1].t) || (wd.t + 0.05 * chars.length);
+        const step = Math.min(0.06, Math.max(0.02, (next - wd.t) / Math.max(1, chars.length)));
+        chars.forEach((ch, j) => { const u = document.createElement('span'); u.className = 'unit'; u.textContent = ch; line.appendChild(u);
+          units.push({ el: u, t: wd.t + j * step, emph: !!wd.emph, style: stName }); });
+      } else {
+        const u = document.createElement('span'); u.className = 'unit'; u.textContent = wd.w; line.appendChild(u);
+        units.push({ el: u, t: wd.t, emph: !!wd.emph, style: stName, next: (it.words[i + 1] && it.words[i + 1].t) || it.end });
+      }
+    });
+    return { it, el, units, anim, k: 1 };
+  });
+
+  function layout(b, k) {
+    b.k = k;
+    b.units.forEach(u => applyStyle(u.el, styleOf(u.style), k));
+    b.el.querySelectorAll('.sp').forEach(sp => applyStyle(sp, styleOf(sp.dataset.style), k));
+    const it = b.it; const align = it.align || 'left', valign = it.valign || 'top';
+    b.el.style.textAlign = align;
+    b.el.style.left = (it.x * W) + 'px'; b.el.style.top = (it.y * H) + 'px';
+    const tx = align === 'center' ? '-50%' : align === 'right' ? '-100%' : '0';
+    const ty = valign === 'middle' ? '-50%' : valign === 'bottom' ? '-100%' : '0';
+    b.base = `translate(${tx}, ${ty})`; b.el.style.transform = b.base;
+  }
+
+  // Auto-shrink so every item fits inside the safe box
+  function fit(b) {
+    layout(b, 1);
+    const it = b.it, x = it.x * W, y = it.y * H, m = SAFE * W, mv = SAFE * H;
+    const align = it.align || 'left', valign = it.valign || 'top';
+    const availW = align === 'left' ? (W - m) - x : align === 'right' ? x - m : 2 * Math.min(x - m, (W - m) - x);
+    const availH = valign === 'top' ? (H - mv) - y : valign === 'bottom' ? y - mv : 2 * Math.min(y - mv, (H - mv) - y);
+    const w = b.el.scrollWidth * 1.06, h = b.el.scrollHeight;  // 6% headroom for emphasis pop
+    const k = Math.min(1, availW / w, availH / h);
+    if (k < 1) layout(b, Math.max(0.2, k * 0.98));
+    b.shrunk = k < 1 ? r2(k) : 1;
+  }
+
+  // Fonts: register data-URI faces, wait, then lay out
+  const faces = (C.fonts || []).map(f => { try { const ff = new FontFace(f.family, `url(${f.src})`, { weight: String(f.weight || 400), style: f.style || 'normal' }); document.fonts.add(ff); return ff.load().catch(() => null); } catch (e) { return Promise.resolve(null); } });
+  window.textLayerReady = Promise.all(faces).then(() => document.fonts.ready).then(() => {
+    built.forEach(fit);
+    window.textLayerReport = built.map(b => ({ id: b.it.id, shrunk: b.shrunk }));
+    return window.textLayerReport;
+  });
+
+  // Deterministic render for time t
+  window.render = function (t) {
+    const sig = [];
+    for (const b of built) {
+      const it = b.it, exitDur = it.exitDur || D.exitDur;
+      if (t < it.start - 0.001 || t > it.end + 0.001) { b.el.style.visibility = 'hidden'; continue; }
+      b.el.style.visibility = 'visible';
+      // exit: blur-out and fade over the last exitDur seconds
+      const q = clamp((t - (it.end - exitDur)) / exitDur, 0, 1);
+      b.el.style.opacity = r2(1 - q); b.el.style.filter = q > 0 ? `blur(${r2(q * 10)}px)` : 'none';
+      let s = `${it.id || ''}:${r2(q)}`;
+      for (const u of b.units) {
+        const dur = it.unitDur || D.unitDur;
+        const p = clamp((t - u.t) / dur, 0, 1), e = easeOut(p);
+        let op = 1, tr = '', bl = 0;
+        if (b.anim === 'typewriter') { op = t >= u.t ? 1 : 0; }
+        else if (b.anim === 'pop') { op = clamp(p * 2.5, 0, 1); tr = `scale(${r2(0.6 + 0.4 * easeOutBack(p))})`; }
+        else if (b.anim === 'slide') { op = e; tr = `translateX(${r2(-(1 - e) * 0.6)}em)`; }
+        else if (b.anim === 'fade') { op = e; }
+        else if (b.anim === 'karaoke') {                          // whole caption shows; the spoken word lights up
+          const pin = clamp((t - it.start) / 0.18, 0, 1); op = pin; tr = `translateY(${r2((1 - easeOut(pin)) * 0.2)}em)`;
+          const st = styleOf(u.style), on = t >= u.t && t < u.next;
+          u.el.style.color = on && st.highlight ? st.highlight : st.color;
+          const hs = st.highlightScale == null ? 1 : st.highlightScale; if (on && hs !== 1) tr += ` scale(${hs})`;
+          s += on ? '*' : '';
+        }
+        else { op = e; tr = `translateY(${r2((1 - e) * 0.28)}em)`; bl = (1 - e) * 10; }   // blur-rise (default)
+        if (u.emph && b.anim !== 'typewriter' && b.anim !== 'karaoke') {                    // stronger pop on the emphasis word
+          const pe = clamp((t - u.t) / 0.45, 0, 1);
+          const sc = 1 + (D.emphScale - 1) * Math.sin(Math.PI * pe) * (pe < 1 ? 1 : 0);
+          tr += ` scale(${r2(sc)})`;
+        }
+        u.el.style.opacity = r2(op); u.el.style.transform = tr || 'none';
+        u.el.style.filter = bl > 0.05 ? `blur(${r2(bl)}px)` : 'none';
+        s += `|${r2(op)},${tr},${r2(bl)}`;
+      }
+      sig.push(s);
+    }
+    return sig.join(';');
+  };
+
+  // Standalone preview: open the file in a browser to watch the SAMPLE play
+  if (!window.TEXT_CONFIG && !window.__NO_AUTOPLAY__) {
+    document.body.style.background = '#F4F2ED';
+    const end = Math.max(...(C.items || []).map(i => i.end), 1) + 0.5; const t0 = performance.now();
+    window.textLayerReady.then(() => { (function loop() { window.render(((performance.now() - t0) / 1000) % end); requestAnimationFrame(loop); })(); });
+  }
+})();
+</script>
+</body>
+</html>
